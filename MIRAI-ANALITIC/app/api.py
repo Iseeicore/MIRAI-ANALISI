@@ -9,12 +9,17 @@ import zipfile
 from pathlib import Path
 
 import pandas as pd
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel
 
 from pipeline import extract_zip_safely, sanitize, scan_folder, submit_exams_to_mirai  # noqa: E402 (adds RETROSPECTIVE/ to sys.path)
-from anonymize_dicoms import anonymize_folder
+from anonymize_dicoms import MissingSecretError, anonymize_folder
 from db import record_exams
+from ingest import reports as ingest_reports
+from ingest import service as ingest_service
+from ingest.config import build_repository, load_settings, load_source_policy
+from ingest.sources import SourceRejected
 
 BLOCK_SIZE = int(os.environ.get("INGEST_BLOCK_SIZE", "50"))
 
@@ -45,7 +50,9 @@ async def ingest(file: UploadFile = File(...), multiple_view_choice: str = "firs
             with zipfile.ZipFile(zip_path) as zf:
                 extract_zip_safely(zf, raw_dir)
             zip_path.unlink()
-            anonymize_folder(Path(raw_dir), Path(anon_dir))
+            anonymize_folder(Path(raw_dir), Path(anon_dir))  # deterministic, keyed by PSEUDONYM_SECRET
+        except MissingSecretError as e:
+            raise HTTPException(status_code=503, detail=str(e))
         except (zipfile.BadZipFile, ValueError, FileNotFoundError) as e:
             raise HTTPException(status_code=400, detail=f"Could not process the .zip: {e}")
 
@@ -88,3 +95,71 @@ async def ingest(file: UploadFile = File(...), multiple_view_choice: str = "firs
     finally:
         shutil.rmtree(raw_dir, ignore_errors=True)
         shutil.rmtree(anon_dir, ignore_errors=True)
+
+
+# --- Batch analysis by URL or /dicom folder (queued; processed by the ingest workers) ---------------
+
+class BatchRequest(BaseModel):
+    source: str
+
+
+_ingest_schema_ready = False
+
+
+def get_ingest_repository():
+    """One MySQL connection per request (PyMySQL connections are not thread-safe)."""
+    global _ingest_schema_ready
+    try:
+        settings = load_settings()
+    except SystemExit:
+        raise HTTPException(status_code=503, detail="Batch ingestion is not configured (MySQL settings missing).")
+    repo = build_repository(settings)
+    try:
+        if not _ingest_schema_ready:
+            repo.apply_schema()
+            _ingest_schema_ready = True
+        yield repo
+    finally:
+        repo.close()
+
+
+def get_source_policy():
+    return load_source_policy()
+
+
+@app.post("/batches", status_code=201)
+def create_batch(body: BatchRequest, repo=Depends(get_ingest_repository), policy=Depends(get_source_policy)):
+    try:
+        batch_id = ingest_service.create_batch(repo, body.source, policy)
+    except SourceRejected as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"batch_id": batch_id}
+
+
+@app.get("/batches/{batch_id}")
+def get_batch(batch_id: int, repo=Depends(get_ingest_repository)):
+    status = ingest_service.batch_status(repo, batch_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="Batch not found.")
+    return status
+
+
+def _report_data_or_404(repo, batch_id: int) -> dict:
+    data = ingest_reports.load_report_data(repo, batch_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Batch not found.")
+    return data
+
+
+@app.get("/batches/{batch_id}/fallos.txt")
+def get_batch_failures(batch_id: int, repo=Depends(get_ingest_repository)):
+    content = ingest_reports.build_failures_txt(_report_data_or_404(repo, batch_id))
+    return Response(content=content, media_type="text/plain; charset=utf-8",
+                    headers={"Content-Disposition": f"attachment; filename=fallos_batch_{batch_id}.txt"})
+
+
+@app.get("/batches/{batch_id}/report.xlsx")
+def get_batch_report(batch_id: int, repo=Depends(get_ingest_repository)):
+    content = ingest_reports.build_report_xlsx(_report_data_or_404(repo, batch_id))
+    return Response(content=content, media_type=ingest_reports.XLSX_MEDIA_TYPE,
+                    headers={"Content-Disposition": f"attachment; filename=report_batch_{batch_id}.xlsx"})

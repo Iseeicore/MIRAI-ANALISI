@@ -21,3 +21,6 @@ MIRAI-ANALITIC/archive/*.zip
 # Estado local de herramientas de agente, no es parte del proyecto
 /.atl/
 /.claude/
+
+# Local DICOM folder mounted into dicom-analyzer (see DICOM_HOST_DIR)
+/data/
