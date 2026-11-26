@@ -1,0 +1,18 @@
+FROM python:3.11-slim
+
+WORKDIR /project
+
+COPY app/requirements.txt app/requirements.txt
+RUN pip install --no-cache-dir -r app/requirements.txt
+
+COPY app/ app/
+COPY RETROSPECTIVE/ RETROSPECTIVE/
+
+ENV STREAMLIT_SERVER_HEADLESS=true \
+    STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+
+WORKDIR /project/app
+
+EXPOSE 8501
+
+CMD ["streamlit", "run", "streamlit_app.py", "--server.port=8501", "--server.address=0.0.0.0"]

@@ -1,0 +1,47 @@
+services:
+  mirai:
+    image: mitjclinic/mirai:latest
+    container_name: mirai-container
+    ports:
+      - "8885:5000"
+    restart: unless-stopped
+
+  dicom-analyzer:
+    build:
+      context: ./MIRAI-ANALITIC
+      dockerfile: app/Dockerfile
+    container_name: dicom-analyzer
+    ports:
+      - "8887:8501"
+    environment:
+      - DICOM_DATA_DIR=${DICOM_DATA_DIR:-/home/is33iv0/Documentos/IA-MAMOGRAFIA}
+      - DB_PATH=/data/analisis.db
+    volumes:
+      - ${DICOM_DATA_DIR:-/home/is33iv0/Documentos/IA-MAMOGRAFIA}:${DICOM_DATA_DIR:-/home/is33iv0/Documentos/IA-MAMOGRAFIA}:ro
+      - dicom_analyzer_db:/data
+    restart: unless-stopped
+
+  dicom-analyzer-api:
+    build:
+      context: ./MIRAI-ANALITIC
+      dockerfile: app/Dockerfile
+    container_name: dicom-analyzer-api
+    command: ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8889:8000"
+    environment:
+      - DB_PATH=/data/analisis.db
+      - MIRAI_URL=http://mirai:5000/dicom/files
+      - INGEST_BLOCK_SIZE=${INGEST_BLOCK_SIZE:-50}
+    volumes:
+      - dicom_analyzer_db:/data
+    restart: unless-stopped
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
+volumes:
+  dicom_analyzer_db:

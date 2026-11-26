@@ -1,0 +1,63 @@
+{
+  "info": {
+    "name": "MIRAI",
+    "description": "Requests for the MIRAI breast cancer risk model (mitjclinic/mirai), equivalent to what the browser UI sends.\n\nEndpoints documented by the provider:\n- GET /info — server and model version information.\n- POST /dicom/files — takes .dcm files belonging to a single exam and returns diagnosis scores.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8885" },
+    { "key": "mrn", "value": "A12345678" },
+    { "key": "accession", "value": "B987654321" },
+    { "key": "patient_name", "value": "Jane Doe" }
+  ],
+  "item": [
+    {
+      "name": "Get Information",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/info",
+        "description": "Returns server and model version information.\n\nResponse fields:\n- data.apiVersion (String): version of the API.\n- data.modelName (String): name of the model, e.g. \"mirai\" or \"sybil\".\n- data.modelVersion (String): version of the model. Models with different versions may have different weights.\n- message (String): informational or error message, usually null.\n- statusCode (Integer): HTTP status code. 200 success, 400 client error, 500 server error."
+      },
+      "response": [
+        {
+          "name": "200 OK",
+          "originalRequest": { "method": "GET", "url": "{{baseUrl}}/info" },
+          "status": "OK",
+          "code": 200,
+          "header": [{ "key": "Content-Type", "value": "application/json" }],
+          "body": "{\n  \"data\": {\n    \"apiVersion\": \"0.8.0\",\n    \"modelName\": \"mirai\",\n    \"modelVersion\": \"0.14.1\"\n  },\n  \"message\": null,\n  \"statusCode\": 200\n}"
+        }
+      ]
+    },
+    {
+      "name": "Send Mammogram (4 DICOM views)",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/dicom/files",
+        "description": "Takes .dcm files belonging to a single exam and returns diagnosis scores.\n\nRequest fields:\n- dicom (File): DICOM data files. Click \"Select Files\" on this single row and multi-select all 4 views at once (CC-R, CC-L, MLO-R, MLO-L) in the same file dialog — do NOT create separate rows for each file, Postman's file picker has a known bug (leftover empty path entry -> EISDIR) when the same key is repeated across multiple rows.\n- data (JSON): required freeform JSON object. Anything in it is echoed back in the response's \"metadata\" field. Can be an empty object {}.\n\nResponse fields:\n- data.predictions (JSON): list of prediction scores.\n- metadata (JSON): freeform object taken from the request's \"data\" field.\n- message (String): informational or error message, usually null.\n- statusCode (Integer): HTTP status code. 200 success, 400 client error, 500 server error.\n- runtime (String): prediction runtime in seconds, formatted as \"123.45s\".",
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "data",
+              "type": "text",
+              "description": "Required freeform JSON object. Can be empty ({}). Anything here is echoed back in the response's \"metadata\" field.",
+              "value": "{\"metadata\":{\"mrn\":\"{{mrn}}\",\"accession\":\"{{accession}}\",\"patient_name\":\"{{patient_name}}\"}}"
+            },
+            { "key": "dicom", "type": "file", "description": "Select all 4 DICOM views at once here (CC-R, CC-L, MLO-R, MLO-L) using multi-select in the file dialog." }
+          ]
+        }
+      },
+      "response": [
+        {
+          "name": "200 OK",
+          "originalRequest": { "method": "POST", "url": "{{baseUrl}}/dicom/files" },
+          "status": "OK",
+          "code": 200,
+          "header": [{ "key": "Content-Type", "value": "application/json" }],
+          "body": "{\n  \"data\": {\n    \"predictions\": {\n      \"Year 1\": 0.0298,\n      \"Year 2\": 0.0483,\n      \"Year 3\": 0.0684,\n      \"Year 4\": 0.09,\n      \"Year 5\": 0.1016\n    }\n  },\n  \"message\": null,\n  \"metadata\": {\n    \"mrn\": \"A12345678\",\n    \"accession\": \"B987654321\",\n    \"patient_name\": \"Jane Doe\"\n  },\n  \"runtime\": \"41.66s\",\n  \"statusCode\": 200\n}"
+        }
+      ]
+    }
+  ]
+}

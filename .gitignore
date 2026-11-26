@@ -1,0 +1,23 @@
+*.csv
+*.dcm
+*.dicom
+*.torch
+*.pkl
+*.pt
+*.pth
+
+IN_PROGRESS/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!**/.env.example
+.venv/
+_UNTRACK
+
+# Datos de demostración descargables (ver README), no se versionan por tamaño
+MIRAI-ANALITIC/archive/*.zip
+
+# Estado local de herramientas de agente, no es parte del proyecto
+/.atl/
+/.claude/

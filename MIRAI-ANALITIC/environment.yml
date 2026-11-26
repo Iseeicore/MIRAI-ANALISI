@@ -1,0 +1,12 @@
+name: gen_eval
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.11
+  - pandas>=2.0,<3.0
+  - pydicom>=3.0,<4.0
+  - requests>=2.31,<3.0
+  - tqdm>=4.65,<5.0
+  - pip

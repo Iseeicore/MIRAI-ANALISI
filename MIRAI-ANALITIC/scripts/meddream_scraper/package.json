@@ -1,0 +1,14 @@
+{
+  "name": "meddream-scraper",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local Playwright test: logs into MedDream and scrapes the first page of the studies table.",
+  "main": "scrape_first_page.js",
+  "scripts": {
+    "scrape": "node scrape_first_page.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "playwright": "^1.65.1"
+  }
+}
