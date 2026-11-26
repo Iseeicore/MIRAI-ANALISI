@@ -31,6 +31,35 @@ def extract_zip_safely(zf: zipfile.ZipFile, dest_dir: str) -> None:
 
 from collect_dicoms import scan_file, OUTPUT_COLUMNS  # noqa: E402
 from sanitize_dicoms import select_unique_views, VIEWS  # noqa: E402
+from anonymize_dicoms import pseudo_patient_id, pseudo_uid  # noqa: E402
+
+
+def pseudonymize_exams(exams_df: pd.DataFrame, secret: str) -> pd.DataFrame:
+    """Replace studyuid/patientid with the same deterministic pseudonyms anonymize_dicoms writes into
+    the files, for modes that scan originals without anonymizing them first (so no original
+    identifier reaches the local SQLite registry). Returns a copy."""
+    out = exams_df.copy()
+    originals = list(zip(out["studyuid"], out["patientid"] if "patientid" in out else [None] * len(out)))
+    out["studyuid"] = [pseudo_uid(secret, "study", uid) for uid, _ in originals]
+    out["patientid"] = [pseudo_patient_id(secret, pid, uid) for uid, pid in originals]
+    return out
+
+
+def pseudonymize_dropped(dropped_df: pd.DataFrame, secret: str) -> pd.DataFrame:
+    """Keep only the user-facing duplicate-view columns and replace StudyUID/PatientID with the
+    same pseudonyms as pseudonymize_exams, so original identifiers never reach the UI or the
+    Excel report. Returns a copy."""
+    out = dropped_df[[c for c in DROPPED_VIEW_COLUMNS if c in dropped_df.columns]].copy()
+    if not len(out):
+        return out
+    original_uids = list(out["StudyUID"]) if "StudyUID" in out else [None] * len(out)
+    if "StudyUID" in out:
+        out["StudyUID"] = [pseudo_uid(secret, "study", uid) for uid in original_uids]
+    if "PatientID" in out:
+        out["PatientID"] = [
+            pseudo_patient_id(secret, pid, uid) for pid, uid in zip(out["PatientID"], original_uids)
+        ]
+    return out
 
 MIRAI_URL = os.environ.get("MIRAI_URL", "http://mirai:5000/dicom/files")
 SCORE_YEARS = ["Year 1", "Year 2", "Year 3", "Year 4", "Year 5"]
@@ -57,8 +86,8 @@ COLUMN_LABELS = {
 }
 
 LEGEND_ROWS = [
-    ("ID de Estudio", "Identificador unico del estudio (StudyInstanceUID) tal como viene en el DICOM."),
-    ("ID de Paciente", "Identificador del paciente (PatientID) tal como viene en el DICOM."),
+    ("ID de Estudio", "Seudonimo deterministico del estudio (StudyInstanceUID reemplazado); el original no se exporta."),
+    ("ID de Paciente", "Seudonimo deterministico del paciente (PatientID reemplazado); la misma paciente tiene el mismo valor en todos los lotes."),
     ("Vista", "Combinacion de lateralidad y posicion: L_CC, L_MLO, R_CC o R_MLO."),
     ("Cantidad de Vistas", "Cuantas de las 4 vistas mamograficas se encontraron para ese estudio (0 a 4)."),
     ("Estudio Completo", "Si (1) cuando el estudio tiene las 4 vistas; No (0) cuando falta alguna."),
