@@ -1,9 +1,47 @@
+# Port layout follows the MIT JCLINIC MIRAI/Sybil installation guide:
+#   MIRAI -> 8885 (web UI / API, container 5000) and 8886 (container 8000)
+#   Sybil -> 8887 and 8888 (reserved, not started here)
+# Our own services live outside that range so Sybil can be added later without clashes.
+#
+# Batch ingestion (mysql + worker-*) needs MYSQL_ROOT_PASSWORD and MYSQL_PASSWORD set in the
+# environment (or .env); there are no secret defaults, so compose refuses to start without them.
+
+x-ingest-worker: &ingest-worker
+  build:
+    context: ./MIRAI-ANALITIC
+    dockerfile: app/Dockerfile
+  restart: unless-stopped
+  depends_on:
+    mysql:
+      condition: service_healthy
+
+x-ingest-env: &ingest-env
+  MYSQL_HOST: mysql
+  MYSQL_PORT: "3306"
+  MYSQL_DATABASE: ${MYSQL_DATABASE:-mirai_ingest}
+  MYSQL_USER: ${MYSQL_USER:-mirai}
+  MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD}
+  MIRAI_URL: http://mirai:5000/dicom/files
+  STAGING_DIR: /staging
+  STAGING_MAX_STUDIES: ${STAGING_MAX_STUDIES:-20}
+  POLL_INTERVAL: ${POLL_INTERVAL:-5}
+  # URL sources (decision 0004): any host whose IPs are all inside these networks, except loopback,
+  # link-local, multicast, broadcast, the Docker bridge and this compose network (always denied).
+  INGEST_ALLOWED_NETWORKS: ${INGEST_ALLOWED_NETWORKS:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}
+  COMPOSE_SUBNET: ${COMPOSE_SUBNET:-172.30.0.0/24}
+  # Optional explicit overrides for named hosts (host or host:port); they skip the network check.
+  INGEST_ALLOWED_HOSTS: ${INGEST_ALLOWED_HOSTS:-}
+  INGEST_MAX_FILE_BYTES: ${INGEST_MAX_FILE_BYTES:-104857600}
+  # Key for deterministic pseudonyms (>= 32 chars). Keep it stable; never commit it.
+  PSEUDONYM_SECRET: ${PSEUDONYM_SECRET:?set PSEUDONYM_SECRET}
+
 services:
   mirai:
     image: mitjclinic/mirai:latest
     container_name: mirai-container
     ports:
       - "8885:5000"
+      - "8886:8000"
     restart: unless-stopped
 
   dicom-analyzer:
@@ -12,13 +50,22 @@ services:
       dockerfile: app/Dockerfile
     container_name: dicom-analyzer
     ports:
-      - "8887:8501"
+      - "8890:8501"
     environment:
-      - DICOM_DATA_DIR=${DICOM_DATA_DIR:-/home/is33iv0/Documentos/IA-MAMOGRAFIA}
-      - DB_PATH=/data/analisis.db
+      # MySQL settings for the "Lotes" view (live batch progress and reports).
+      <<: *ingest-env
+      DICOM_DATA_DIR: /dicom
+      DB_PATH: /data/analisis.db
+      MIRAI_URL: http://mirai:5000/dicom/files
     volumes:
-      - ${DICOM_DATA_DIR:-/home/is33iv0/Documentos/IA-MAMOGRAFIA}:${DICOM_DATA_DIR:-/home/is33iv0/Documentos/IA-MAMOGRAFIA}:ro
+      # Host folder with the DICOM studies (Windows or Linux path), mounted read-only at /dicom.
+      - ${DICOM_HOST_DIR:-./data}:/dicom:ro
       - dicom_analyzer_db:/data
+    depends_on:
+      mirai:
+        condition: service_started
+      mysql:
+        condition: service_healthy
     restart: unless-stopped
 
   dicom-analyzer-api:
@@ -30,18 +77,82 @@ services:
     ports:
       - "8889:8000"
     environment:
-      - DB_PATH=/data/analisis.db
-      - MIRAI_URL=http://mirai:5000/dicom/files
-      - INGEST_BLOCK_SIZE=${INGEST_BLOCK_SIZE:-50}
+      <<: *ingest-env
+      DB_PATH: /data/analisis.db
+      MIRAI_URL: http://mirai:5000/dicom/files
+      INGEST_BLOCK_SIZE: ${INGEST_BLOCK_SIZE:-50}
+      # X-API-Key values accepted by /batches* (comma-separated, >= 32 chars each). No default.
+      INGEST_API_KEYS: ${INGEST_API_KEYS:?set INGEST_API_KEYS}
     volumes:
       - dicom_analyzer_db:/data
+      # Read-only, only so POST /batches can check that a /dicom/... source folder exists.
+      - ${DICOM_HOST_DIR:-./data}:/dicom:ro
+    depends_on:
+      mirai:
+        condition: service_started
+      mysql:
+        condition: service_healthy
     restart: unless-stopped
+
+  # State store and job queue for batch ingestion. Published on localhost only.
+  mysql:
+    image: mysql:8.4
+    container_name: mirai-ingest-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-mirai_ingest}
+      MYSQL_USER: ${MYSQL_USER:-mirai}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD}
+    ports:
+      - "127.0.0.1:3307:3306"
+    volumes:
+      - ingest_mysql:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+
+  worker-crawl:
+    <<: *ingest-worker
+    command: ["python", "-m", "ingest.worker", "--role", "crawl"]
+    environment: *ingest-env
+    volumes:
+      - ${DICOM_HOST_DIR:-./data}:/dicom:ro
+
+  worker-fetch:
+    <<: *ingest-worker
+    command: ["python", "-m", "ingest.worker", "--role", "fetch"]
+    environment: *ingest-env
+    volumes:
+      - ${DICOM_HOST_DIR:-./data}:/dicom:ro
+      - ingest_staging:/staging
+
+  # Exactly one score worker per MIRAI instance: MIRAI is OOM-killed on concurrent requests.
+  worker-score:
+    <<: *ingest-worker
+    command: ["python", "-m", "ingest.worker", "--role", "score"]
+    environment: *ingest-env
+    volumes:
+      - ingest_staging:/staging
+    depends_on:
+      mysql:
+        condition: service_healthy
+      mirai:
+        condition: service_started
+    # Let an in-flight MIRAI request (about 45 s on CPU) finish on `docker compose stop`.
+    stop_grace_period: 2m
 
 networks:
   default:
     ipam:
       config:
-        - subnet: 172.30.0.0/24
+        # Override with COMPOSE_SUBNET in .env if it overlaps an existing Docker network.
+        - subnet: ${COMPOSE_SUBNET:-172.30.0.0/24}
 
 volumes:
   dicom_analyzer_db:
+  ingest_mysql:
+  ingest_staging:

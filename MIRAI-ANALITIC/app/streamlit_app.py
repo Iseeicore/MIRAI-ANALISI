@@ -9,11 +9,14 @@ from pathlib import Path
 
 import streamlit as st
 
-from pipeline import scan_folder, sanitize, build_excel_report, submit_exams_to_mirai, extract_zip_safely
-from anonymize_dicoms import anonymize_folder
+from pipeline import (
+    scan_folder, sanitize, build_excel_report, submit_exams_to_mirai, extract_zip_safely, pseudonymize_exams,
+    pseudonymize_dropped,
+)
+from anonymize_dicoms import MissingSecretError, anonymize_folder, load_secret
 from db import record_exams
 
-DICOM_DATA_DIR = os.environ.get("DICOM_DATA_DIR", "/home/is33iv0/Documentos/IA-MAMOGRAFIA")
+DICOM_DATA_DIR = os.environ.get("DICOM_DATA_DIR", "/dicom")
 
 st.set_page_config(page_title="Analisis de Mamografias", layout="wide")
 st.title("Analisis de Mamografias (pre-MIRAI)")
@@ -21,6 +24,14 @@ st.caption(
     "Escanea archivos DICOM, arma los estudios de 4 vistas, "
     "detecta duplicados e incompletos, y genera un reporte Excel."
 )
+
+VIEW_ANALYSIS = "Analizar carpeta o archivos"
+VIEW_BATCHES = "Lotes (procesamiento en segundo plano)"
+if st.sidebar.radio("Vista", options=[VIEW_ANALYSIS, VIEW_BATCHES], index=0) == VIEW_BATCHES:
+    from batches_view import render_batches
+
+    render_batches()
+    st.stop()
 
 mode = st.radio(
     "Como queres cargar las imagenes",
@@ -53,7 +64,7 @@ with st.form("analysis_form"):
     else:
         folder = st.text_input(
             "Ruta de la carpeta con las imagenes DICOM",
-            value=f"{DICOM_DATA_DIR}/MIRAI-ANALITIC/data/mirai_demo_data",
+            value=f"{DICOM_DATA_DIR}/mirai_demo_data",
             help=f"Debe estar dentro de la carpeta montada en el contenedor ({DICOM_DATA_DIR}).",
         )
     choice_label = st.selectbox(
@@ -87,7 +98,12 @@ if submitted:
             try:
                 with zipfile.ZipFile(uploaded_zip) as zf:
                     extract_zip_safely(zf, raw_dir)
-                anonymize_folder(Path(raw_dir), Path(anonymized_dir))
+                anonymize_folder(Path(raw_dir), Path(anonymized_dir))  # deterministic, keyed by PSEUDONYM_SECRET
+            except MissingSecretError as e:
+                for d in cleanup_dirs:
+                    shutil.rmtree(d, ignore_errors=True)
+                st.error(str(e))
+                st.stop()
             except (zipfile.BadZipFile, ValueError, FileNotFoundError) as e:
                 for d in cleanup_dirs:
                     shutil.rmtree(d, ignore_errors=True)
@@ -125,6 +141,18 @@ if submitted:
                 )
 
             exams_df = submit_exams_to_mirai(exams_df, progress_cb=on_mirai_progress)
+
+        if not use_zip:
+            # Server-path and upload modes scan the original files: replace StudyInstanceUID and
+            # PatientID with the anonymizer's deterministic pseudonyms before anything is shown,
+            # exported or stored. Without the secret, nothing is shown.
+            try:
+                secret = load_secret()
+            except MissingSecretError as e:
+                st.error(f"No se puede mostrar el resultado sin seudonimizar: {e}")
+                st.stop()
+            exams_df = pseudonymize_exams(exams_df, secret)
+            dropped_df = pseudonymize_dropped(dropped_df, secret)
 
         excel_bytes = build_excel_report(raw_df, exams_df, dropped_df, stats, scanned_total_files)
 
