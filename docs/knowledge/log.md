@@ -21,3 +21,6 @@ description: "Append-only history of knowledge changes. Never edit past lines."
 - 2026-11-26 · feature · [URL batch ingestion](features/url-batch-ingestion.md) · in-progress (stage 3 done: deterministic pseudonymization)
 - 2026-11-26 · constraint · [Patient data pseudonymization](constraints/patient-data-pseudonymization.md) · active (gaps fixed; Streamlit server/upload Excel still open)
 - 2026-11-26 · constraint · [Patient data pseudonymization](constraints/patient-data-pseudonymization.md) · active (Streamlit server/upload leak fixed; pre-stage-3 test rows purged)
+- 2026-11-26 · decision · [0004 URL source access by private network ranges, API key, and probe on submit](decisions/0004-url-source-network-policy-and-api-key.md) · accepted
+- 2026-11-26 · feature · [URL batch ingestion](features/url-batch-ingestion.md) · in-progress (decision 0004 implemented: network policy, API key, probe)
+- 2026-11-26 · constraint · [Deployment network reachability](constraints/deployment-network-reachability.md) · active

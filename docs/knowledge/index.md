@@ -19,11 +19,13 @@ description: "Map of features, decisions, and constraints of MIRAI-ANALISI."
 
 - [0001 URL batch ingestion pipeline with MySQL as job queue](decisions/0001-url-batch-ingestion-mysql-queue.md) — superseded by 0003
 - [0003 Study identity from DICOM headers at crawl time, and failure reports](decisions/0003-study-identity-from-dicom-headers.md) — accepted
+- [0004 URL source access by private network ranges, API key, and probe on submit](decisions/0004-url-source-network-policy-and-api-key.md) — accepted
 - [0002 Port layout from the MIT JCLINIC guide](decisions/0002-port-layout-mit-jclinic-guide.md) — accepted
 
 ## Constraints
 
 - [Patient data pseudonymization](constraints/patient-data-pseudonymization.md) — active
+- [Deployment network reachability](constraints/deployment-network-reachability.md) — active
 
 ## History
 
