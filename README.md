@@ -4,13 +4,23 @@ Pipeline local para analizar mamografías DICOM con el modelo de riesgo **MIRAI*
 
 Todo corre en contenedores Docker: ni las imágenes DICOM ni los resultados salen de la máquina.
 
+**Inicio rápido:**
+
+- **Servidor Linux de la red del hospital (uso real):** sección [Despliegue en un servidor Linux de la red](#despliegue-en-un-servidor-linux-de-la-red-paso-a-paso).
+- **PC Windows de desarrollo:** secciones [1](#1-descargar-la-imagen-de-mirai) y [2](#2-levantar-el-backend-completo-con-docker-compose).
+- **Enviar un lote desde otro equipo (supervisor):** sección [Probar desde otra máquina de la red](#probar-desde-otra-máquina-de-la-red-paso-a-paso).
+
 ## Arquitectura
 
 | Servicio | Descripción | Puerto host → contenedor |
 |---|---|---|
 | `mirai` | Imagen oficial `mitjclinic/mirai`, sirve el modelo de riesgo vía Flask | `8885` → `5000`, `8886` → `8000` |
-| `dicom-analyzer` | Panel Streamlit para explorar/anonimizar estudios y ver resultados | `8890` → `8501` |
-| `dicom-analyzer-api` | API FastAPI que ingiere lotes DICOM y los reenvía a `mirai` | `8889` → `8000` |
+| `dicom-analyzer` | Panel Streamlit para explorar/anonimizar estudios y ver el progreso de los lotes | `8890` → `8501` |
+| `dicom-analyzer-api` | API FastAPI: lotes por URL (`/batches`, con API key), documentación en `/docs` y el endpoint `/ingest` (.zip) | `8889` → `8000` |
+| `mysql` | Estado y cola de trabajos de los lotes | `127.0.0.1:3307` → `3306` (solo local) |
+| `worker-crawl` | Recorre el árbol (carpeta o URL) y agrupa las imágenes por estudio | — |
+| `worker-fetch` | Descarga, seudonimiza y arma las 4 vistas de cada estudio | — |
+| `worker-score` | Envía cada estudio completo a MIRAI (uno a la vez) | — |
 
 Definidos en `docker-compose.yml`, en la raíz del repo.
 
@@ -18,12 +28,14 @@ Los puertos `8885`/`8886` son los que indica la guía oficial para MIRAI; `8887`
 
 ## Requisitos
 
-- Docker Desktop instalado (en Windows, con WSL2 habilitado)
-- 15 GB de almacenamiento libre
-- 8 GB de RAM
+- Docker: Docker Desktop en Windows (con WSL2) o Docker Engine + Compose en Linux
+- 15 GB de almacenamiento libre (20 GB recomendado con staging de lotes)
+- 8 GB de RAM libres para MIRAI (16 GB de RAM total recomendado)
 - Procesador moderno (i5/i7 o equivalente)
 
 (Especificaciones según la guía oficial *Instalación de MIRAI/Sybil* de MIT JCLINIC.)
+
+En Windows, Docker Desktop limita la RAM de la VM de WSL: si MIRAI se cae con `OOMKilled` (ver `docker inspect mirai-container --format '{{.State.OOMKilled}}'`), detener otros contenedores o subir `memory=` en `%UserProfile%\.wslconfig`. En Linux no hay ese límite.
 
 ## 1. Descargar la imagen de MIRAI
 
@@ -42,43 +54,65 @@ La imagen pesa ~3.7 GB. Una vez descargada, no necesita conexión a internet par
 
 ## 2. Levantar el backend completo con docker-compose
 
+En Windows, ejecutar estos comandos en **Git Bash**; en Linux, en la terminal.
+
 ```bash
-# Clonar el repo
+# Clonar el repo y usar la rama con la ingesta por URL (hasta que se fusione a main)
 git clone https://github.com/Iseeicore/MIRAI-ANALISI.git
 cd MIRAI-ANALISI
+git switch feat/url-batch-ingestion
 
-# Copiar y completar las variables de entorno del backend
-cp .env.example .env
-# editar .env: apuntar DICOM_HOST_DIR a la carpeta local con tus estudios DICOM (default ./data)
+# Crear el .env con todas las claves obligatorias (se escriben en el archivo, no se muestran)
+python - <<'EOF' > .env
+import secrets
+print("COMPOSE_SUBNET=172.30.0.0/24")
+print("MYSQL_ROOT_PASSWORD=" + secrets.token_urlsafe(24))
+print("MYSQL_PASSWORD=" + secrets.token_urlsafe(24))
+print("PSEUDONYM_SECRET=" + secrets.token_hex(32))
+print("INGEST_API_KEYS=" + secrets.token_urlsafe(32))
+EOF
 
-# Levantar mirai + backend (build de las imágenes propias + pull de mirai)
+# Validar la configuración sin mostrar valores
+docker compose config -q && echo OK
+
+# Levantar todo (descarga MIRAI la primera vez y construye las imágenes propias)
 docker compose up -d --build
 ```
+
+En Linux usar `python3` si `python` no existe. `.env.example` no incluye las variables obligatorias de los lotes: no usarlo como base. Si `docker compose up` falla con `Pool overlaps with other one`, cambiar `COMPOSE_SUBNET` por una subred libre (ver la tabla de la sección 3).
 
 Servicios disponibles:
 
 - MIRAI: http://localhost:8885
-- Panel Streamlit (`dicom-analyzer`): http://localhost:8890
-- API FastAPI (`dicom-analyzer-api`): http://localhost:8889
+- Panel Streamlit (`dicom-analyzer`): http://localhost:8890 (vista "Lotes" en la barra lateral)
+- API FastAPI (`dicom-analyzer-api`): http://localhost:8889, con documentación interactiva en http://localhost:8889/docs
 
 Otros comandos útiles:
 
 ```bash
-docker compose logs -f mirai        # ver logs de un servicio
 docker compose ps                   # estado de los contenedores
-docker compose down                 # apagar todo
+docker compose logs -f mirai        # ver logs de un servicio
+docker compose stop                 # apagar sin borrar datos
+docker compose start                # volver a prender
+docker compose down                 # eliminar los contenedores (los volúmenes y datos se conservan)
 ```
 
-Si un contenedor quedó detenido, no hace falta recrearlo: `docker compose start <servicio>` lo reanuda.
+> [!IMPORTANT]
+> MySQL toma las contraseñas del `.env` solo la primera vez que crea su volumen. Si se cambian después, hay que recrearlo (se pierden los lotes registrados): `docker compose down && docker volume rm mirai-analisi_ingest_mysql && docker compose up -d`.
 
 ## 3. Variables de entorno
 
-### Backend (`.env` en la raíz — ver `.env.example`)
+### Backend (`.env` en la raíz)
+
+Obligatorias (sin ellas `docker compose` no arranca): `MYSQL_ROOT_PASSWORD`, `MYSQL_PASSWORD`, `PSEUDONYM_SECRET`, `INGEST_API_KEYS`. El detalle de las variables de lotes está en la sección "Batch analysis by URL".
 
 | Variable | Uso | Default |
 |---|---|---|
-| `DICOM_HOST_DIR` | Carpeta del host (ruta Windows o Linux) con los DICOM; se monta de solo lectura en `/dicom` dentro del panel | `./data` |
-| `INGEST_BLOCK_SIZE` | Tamaño de lote que procesa `dicom-analyzer-api` por request | `50` |
+| `COMPOSE_SUBNET` | Subred interna de Docker para este proyecto; debe no coincidir con otras redes (`ip -4 route` en Linux, `docker network ls`) | `172.30.0.0/24` |
+| `DICOM_HOST_DIR` | Carpeta del host (ruta Windows o Linux) con los DICOM; se monta de solo lectura en `/dicom` | `./data` |
+| `INGEST_BLOCK_SIZE` | Tamaño de bloque que procesa `/ingest` (.zip) por request | `50` |
+
+Reglas del `.env`: una variable por línea, sin comillas; si una variable aparece dos veces, vale la última. Al agregar líneas con `>>`, empezar con un salto de línea (`'\n'`) para no pegarlas a la línea anterior. Nunca subir `.env` a git ni pegar sus valores en un chat.
 
 ### Scraper de Playwright (MedDream)
 
@@ -354,7 +388,23 @@ curl -s -H "X-API-Key: $KEY" -o fallos.txt   http://192.168.1.50:8889/batches/N/
 curl -s -H "X-API-Key: $KEY" -o reporte.xlsx http://192.168.1.50:8889/batches/N/report.xlsx
 ```
 
-También se puede usar el navegador: `http://192.168.1.50:8889/docs` → **Authorize** → pegar la clave → `POST /batches` → **Try it out**.
+También se puede usar el navegador, incluso desde un celular en la misma red:
+
+1. Abrir `http://192.168.1.50:8889/docs`.
+2. **Authorize** → pegar la clave → **Authorize** → **Close**.
+3. `POST /batches` → **Try it out** → **reemplazar el ejemplo** del body por la ruta real (o `{"source": "/dicom/mirai_demo_data"}` para una prueba) → **Execute**.
+4. Respuesta esperada: `201` con `{"batch_id": N}`. Seguir el avance con `GET /batches/{batch_id}`.
+
+Si la clave se cambia en el servidor, Swagger conserva la anterior: hacer **Authorize → Logout** y cargar la nueva. Un `401` con una clave que antes funcionaba indica que fue rotada.
+
+#### Rotar la API key (por ejemplo, si se filtró)
+
+```bash
+python -c "import secrets;print('\nINGEST_API_KEYS='+secrets.token_urlsafe(32))" >> .env   # agrega una clave nueva; vale la última línea
+docker compose up -d                                                                     # recrea la API con la clave nueva
+```
+
+La clave anterior deja de funcionar al instante (`401`). Para tener varias claves activas a la vez (una por persona), separarlas con coma en una sola línea `INGEST_API_KEYS=clave1,clave2`.
 
 #### En un cliente Windows (PowerShell)
 
@@ -384,38 +434,77 @@ Toda anonimización (lotes, `/ingest`, modo .zip del panel) reemplaza PatientID/
 
 ## 4. Probar la instalación
 
-MIT JCLINIC provee estudios de demostración (una mamografía de ejemplo y un estudio LDCT) para validar que MIRAI responde. No se versionan en este repo por tamaño: descargalos desde los links de la guía oficial de instalación y descomprimilos en `./data/mirai_demo_data` (el panel la propone por defecto como `/dicom/mirai_demo_data`), o probá directo contra el contenedor:
+MIT JCLINIC publica una mamografía de demostración (4 proyecciones) para validar que MIRAI responde. No se versiona en este repo por tamaño (~60 MB).
+
+**1. Descargar la mamografía de demostración** (Linux o Git Bash; en Linux instalar `unzip` con `sudo apt install -y unzip` si falta):
 
 ```bash
-curl -s -X POST \
-  -F 'data={"metadata":{"mrn":"test","accession":"test","patient_name":"demo"}}' \
-  -F 'dicom=@/ruta/a/ccr1.dcm' \
-  -F 'dicom=@/ruta/a/ccl1.dcm' \
-  -F 'dicom=@/ruta/a/mlor2.dcm' \
-  -F 'dicom=@/ruta/a/mlol2.dcm' \
-  http://localhost:8885/dicom/files
+mkdir -p data/mirai_demo_data
+curl -L -o /tmp/mirai_demo_data.zip https://github.com/reginabarzilaygroup/Mirai/releases/download/v0.14.1/mirai_demo_data.zip
+unzip -o /tmp/mirai_demo_data.zip -d data/mirai_demo_data   # deja ccl1.dcm, ccr1.dcm, mlol2.dcm y mlor2.dcm
 ```
 
-MIRAI requiere las 4 proyecciones estándar (L-CC, L-MLO, R-CC, R-MLO); no procesa estudios parciales.
+`data/` está en `.gitignore`. Dentro de los contenedores esa carpeta se ve como `/dicom/mirai_demo_data`.
+
+**2. Probar MIRAI directo** (sin API key; el modelo tarda ~45 s en CPU):
+
+```bash
+cd data/mirai_demo_data
+curl -s -X POST \
+  -F 'data={"metadata":{"mrn":"test","accession":"test","patient_name":"demo"}}' \
+  -F 'dicom=@ccr1.dcm' -F 'dicom=@ccl1.dcm' -F 'dicom=@mlor2.dcm' -F 'dicom=@mlol2.dcm' \
+  http://localhost:8885/dicom/files
+cd ../..
+```
+
+Resultado esperado: `"predictions":{"Year 1":0.0298,"Year 2":0.0483,"Year 3":0.0684,"Year 4":0.09,"Year 5":0.1016}`.
+
+**3. Probar el flujo completo por lotes** (con la API key del `.env`):
+
+```bash
+KEY=$(grep '^INGEST_API_KEYS=' .env | tail -1 | cut -d= -f2- | cut -d, -f1)
+curl -s -X POST http://localhost:8889/batches -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"source":"/dicom/mirai_demo_data"}'; echo          # -> {"batch_id": N}
+curl -s -H "X-API-Key: $KEY" http://localhost:8889/batches/N; echo   # repetir hasta ver "DONE":1 con los mismos scores
+```
+
+MIRAI requiere las 4 proyecciones estándar (L-CC, L-MLO, R-CC, R-MLO); un estudio con menos queda como `INCOMPLETE` en `fallos.txt`.
 
 ## Estructura del repositorio
 
 ```
-IA-MAMOGRAFIA/
-├── docker-compose.yml              # orquesta mirai + backend
-├── .env.example                    # variables del backend
+MIRAI-ANALISI/
+├── docker-compose.yml              # mirai + panel + API + mysql + workers
+├── .env                            # claves locales (no se versiona; ver sección 2)
+├── data/                           # DICOM locales montados en /dicom (no se versiona)
+├── docs/knowledge/                 # decisiones, features y restricciones del proyecto
 └── MIRAI-ANALITIC/
-    ├── app/                        # FastAPI + Streamlit (backend)
-    ├── RETROSPECTIVE/              # pipeline batch de anonimización/envío a MIRAI
+    ├── app/
+    │   ├── api.py                  # FastAPI: /batches, /ingest, /docs
+    │   ├── streamlit_app.py        # panel (análisis directo y vista "Lotes")
+    │   ├── ingest/                 # lotes: fuentes, workers, MySQL, reportes
+    │   └── test_*.py               # tests (python test_x.py dentro de la imagen)
+    ├── RETROSPECTIVE/              # escaneo, saneo y anonimización HMAC de DICOM
     └── scripts/meddream_scraper/   # scraper Playwright del visor MedDream
 ```
 
+Para correr los tests: `docker compose build dicom-analyzer` y luego, por ejemplo, `docker run --rm mirai-analisi-dicom-analyzer python test_ingest_api.py`.
+
 ## Problemas comunes
 
-- **No se puede acceder a `localhost:8885`**: confirmar que el contenedor `mirai` esté corriendo (`docker compose ps`) y que se esté usando `http`, no `https`.
-- **Puerto ya en uso**: cambiar el mapeo de puertos (`"8885:5000"`, etc.) en `docker-compose.yml`.
-- **"Out of memory" al iniciar MIRAI**: Docker necesita al menos 8 GB de RAM asignados (Docker Desktop → Settings → Resources).
-- **Disco lleno**: MIRAI necesita 15 GB libres.
+| Síntoma | Causa y solución |
+|---|---|
+| `required variable ... is missing a value` al usar `docker compose` | Falta una variable obligatoria en `.env` o quedó pegada a otra línea. Revisar que cada variable esté en su propia línea (sección 2). |
+| `Pool overlaps with other one on this address space` | `COMPOSE_SUBNET` coincide con otra red. Elegir una libre (por ejemplo `172.32.0.0/24`) y repetir `docker compose up -d`. |
+| Workers con `Access denied for user` en los logs | Se cambiaron las contraseñas de MySQL después de crear el volumen: recrearlo (sección 2, aviso de MySQL). |
+| MIRAI no responde o el estudio queda `FAILED` con un timeout | MIRAI se quedó sin memoria: `docker inspect mirai-container --format '{{.State.OOMKilled}}'` devuelve `true`. Liberar RAM (sección Requisitos). |
+| No se puede acceder a `localhost:8885` | Confirmar que `mirai` esté corriendo (`docker compose ps`) y usar `http`, no `https`. |
+| Otro equipo no llega a `:8889` | Firewall del servidor o redes distintas: ver "Probar desde otra máquina de la red". |
+| `401 invalid or missing API key` | Clave mal copiada o rotada; en Swagger, **Logout** y volver a autorizar. |
+| `422` al crear un lote | La URL o carpeta no existe, no responde o no es un listado de carpetas; el mensaje indica cuál. |
+| `400` al crear un lote | La URL apunta a una red no permitida (internet, localhost, red de Docker). |
+| Puerto ya en uso | Cambiar el mapeo (`"8885:5000"`, etc.) en `docker-compose.yml`. |
+| Disco lleno | MIRAI necesita 15 GB libres, más hasta ~2 GB de staging de lotes. |
 
 ---
 
