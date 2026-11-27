@@ -129,7 +129,10 @@ post = spec["paths"]["/batches"]["post"]
 assert post.get("security"), post
 assert {"201", "400", "401", "422", "503"} <= set(post["responses"]), post["responses"].keys()
 assert "Pegue la URL" in str(spec), "Spanish guidance for the supervisor"
-assert "http://10.0.5.20:8080/mamografias/" in str(spec["components"]["schemas"]["BatchRequest"])
+batch_schema = str(spec["components"]["schemas"]["BatchRequest"])
+assert "http://IP-DEL-SERVIDOR:PUERTO/ruta/" in batch_schema
+# the example must read as a template, never as a real-looking address someone could execute as-is
+assert "10.0.5.20" not in batch_schema
 for path in ("/batches/{batch_id}", "/batches/{batch_id}/fallos.txt", "/batches/{batch_id}/report.xlsx"):
     assert spec["paths"][path]["get"].get("security"), path
 assert not spec["paths"]["/health"]["get"].get("security")

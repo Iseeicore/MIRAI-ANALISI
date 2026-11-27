@@ -115,13 +115,14 @@ class ErrorDetail(BaseModel):
 
 
 class BatchRequest(BaseModel):
-    model_config = ConfigDict(json_schema_extra={"example": {"source": "http://10.0.5.20:8080/mamografias/"}})
+    model_config = ConfigDict(json_schema_extra={"example": {"source": "http://IP-DEL-SERVIDOR:PUERTO/ruta/"}})
 
     source: str = Field(
-        description=("Pegue la URL del listado de carpetas del servidor de imagenes (por ejemplo "
-                     "http://10.0.5.20:8080/mamografias/). Debe ser una direccion de la red interna del hospital "
-                     "y mostrar las carpetas de los estudios. Tambien acepta una carpeta montada bajo /dicom."),
-        examples=["http://10.0.5.20:8080/mamografias/"],
+        description=("Reemplace el ejemplo por la URL real del listado de carpetas del servidor de imagenes "
+                     "(formato http://IP-DEL-SERVIDOR:PUERTO/ruta/). Debe ser una direccion de la red interna del "
+                     "hospital y mostrar las carpetas de los estudios. Tambien acepta una carpeta montada bajo "
+                     "/dicom, por ejemplo /dicom/mirai_demo_data para una prueba."),
+        examples=["http://IP-DEL-SERVIDOR:PUERTO/ruta/"],
     )
 
 
