@@ -4,8 +4,15 @@ or nginx `autoindex_format json`).
 Paths are relative to the root URL, percent-encoded as they appear in the index, without leading or
 trailing slashes (same contract as FilesystemSource). Every listed link is resolved and kept only
 when it is a direct child of the folder being listed and stays inside the root URL (same scheme,
-host and port, no `..` even percent-encoded). Every request re-checks the host allowlist, never
-follows redirects, and full downloads are capped at max_file_bytes.
+host and port, no `..` even percent-encoded). Redirects are never followed and full downloads are
+capped at max_file_bytes.
+
+Every request re-validates the URL against the SourcePolicy (decision 0004), resolving the host again.
+For plain http the connection goes to the validated IP with the original Host header (IP pinning), so
+a DNS answer that changes between the check and the request cannot redirect it. For https the
+hostname is kept (certificate validation needs it), so a resolver that returns a different IP between
+the check and the TLS connection (DNS rebinding) remains a residual risk; prefer http with IP pinning
+or an INGEST_ALLOWED_HOSTS override for https sources.
 """
 import io
 import json
@@ -13,13 +20,13 @@ import posixpath
 import tempfile
 from html.parser import HTMLParser
 from typing import BinaryIO, Optional
-from urllib.parse import quote, unquote, urljoin, urlsplit
+from urllib.parse import quote, unquote, urljoin, urlsplit, urlunsplit
 
 import requests
 
 from ..domain import Entry, normalize_rel_path
 from ..ports import ByteRange
-from ..sources import SourceRejected, ensure_url_allowed
+from ..sources import SourcePolicy, SourceRejected, resolve_target
 
 CONNECT_TIMEOUT_SECONDS = 10
 READ_TIMEOUT_SECONDS = 120
@@ -31,6 +38,10 @@ SPOOL_IN_MEMORY_BYTES = 8 * 1024 * 1024
 class SourceError(OSError):
     """A request to the source failed (HTTP error, redirect, oversized file). An OSError, so the
     workers skip the item instead of crashing."""
+
+
+class SourceConnectionError(SourceError):
+    """The server could not be reached (connection refused, timeout, unreachable network)."""
 
 
 class _LinkParser(HTMLParser):
@@ -110,11 +121,11 @@ def parse_listing(body: bytes, content_type: str, dir_url: str, root_url: str) -
 
 
 class HttpIndexSource:
-    def __init__(self, root_url: str, allowed_hosts: set, max_file_bytes: int, session=None):
-        ensure_url_allowed(root_url, allowed_hosts)
+    def __init__(self, root_url: str, policy: SourcePolicy, session=None, read_timeout: Optional[float] = None):
+        resolve_target(root_url, policy)
         self._root = root_url if root_url.endswith("/") else root_url + "/"
-        self._allowed_hosts = allowed_hosts
-        self._max_file_bytes = max_file_bytes
+        self._policy = policy
+        self._read_timeout = read_timeout or READ_TIMEOUT_SECONDS
         self._session = session or requests.Session()
 
     def _url(self, rel_path: str, is_dir: bool) -> str:
@@ -124,11 +135,23 @@ class HttpIndexSource:
         url = self._root + rel
         return url + "/" if is_dir and rel else url
 
+    def _pinned(self, url: str):
+        """(request URL, extra headers): plain http goes to the validated IP with the original Host."""
+        target = resolve_target(url, self._policy)  # raises SourceRejected; re-run on every request
+        parts = urlsplit(url)
+        if target.pinned_ip is None or target.scheme != "http":
+            return url, {}
+        ip = f"[{target.pinned_ip}]" if ":" in target.pinned_ip else target.pinned_ip
+        netloc = f"{ip}:{parts.port}" if parts.port else ip
+        return urlunsplit(("http", netloc, parts.path, parts.query, "")), {"Host": parts.netloc}
+
     def _get(self, url: str, headers=None):
-        ensure_url_allowed(url, self._allowed_hosts)
+        request_url, pin_headers = self._pinned(url)
         try:
-            response = self._session.get(url, headers=headers or {}, stream=True, allow_redirects=False,
-                                         timeout=(CONNECT_TIMEOUT_SECONDS, READ_TIMEOUT_SECONDS))
+            response = self._session.get(request_url, headers={**(headers or {}), **pin_headers}, stream=True,
+                                         allow_redirects=False, timeout=(CONNECT_TIMEOUT_SECONDS, self._read_timeout))
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            raise SourceConnectionError(f"could not connect ({type(exc).__name__})") from None
         except requests.RequestException as exc:
             raise SourceError(f"request failed ({type(exc).__name__})") from None
         if 300 <= response.status_code < 400:
@@ -189,7 +212,7 @@ class HttpIndexSource:
         response = self._get(url)
         spool = tempfile.SpooledTemporaryFile(max_size=SPOOL_IN_MEMORY_BYTES)
         try:
-            self._read_capped(response, self._max_file_bytes, spool)
+            self._read_capped(response, self._policy.max_file_bytes, spool)
         except BaseException:
             spool.close()
             raise

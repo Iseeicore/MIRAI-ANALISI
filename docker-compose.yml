@@ -25,7 +25,11 @@ x-ingest-env: &ingest-env
   STAGING_DIR: /staging
   STAGING_MAX_STUDIES: ${STAGING_MAX_STUDIES:-20}
   POLL_INTERVAL: ${POLL_INTERVAL:-5}
-  # Hosts allowed as batch URL sources (comma-separated host or host:port). Empty = URL sources disabled.
+  # URL sources (decision 0004): any host whose IPs are all inside these networks, except loopback,
+  # link-local, multicast, broadcast, the Docker bridge and this compose network (always denied).
+  INGEST_ALLOWED_NETWORKS: ${INGEST_ALLOWED_NETWORKS:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}
+  COMPOSE_SUBNET: ${COMPOSE_SUBNET:-172.30.0.0/24}
+  # Optional explicit overrides for named hosts (host or host:port); they skip the network check.
   INGEST_ALLOWED_HOSTS: ${INGEST_ALLOWED_HOSTS:-}
   INGEST_MAX_FILE_BYTES: ${INGEST_MAX_FILE_BYTES:-104857600}
   # Key for deterministic pseudonyms (>= 32 chars). Keep it stable; never commit it.
@@ -77,6 +81,8 @@ services:
       DB_PATH: /data/analisis.db
       MIRAI_URL: http://mirai:5000/dicom/files
       INGEST_BLOCK_SIZE: ${INGEST_BLOCK_SIZE:-50}
+      # X-API-Key values accepted by /batches* (comma-separated, >= 32 chars each). No default.
+      INGEST_API_KEYS: ${INGEST_API_KEYS:?set INGEST_API_KEYS}
     volumes:
       - dicom_analyzer_db:/data
       # Read-only, only so POST /batches can check that a /dicom/... source folder exists.

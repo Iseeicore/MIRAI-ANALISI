@@ -1,6 +1,7 @@
 """HTTP ingestion endpoint: one POST that receives a .zip and runs the whole
 pipeline (anonymize -> scan -> sanitize -> MIRAI score -> SQLite) in blocks,
 so a large batch doesn't need to fit in memory or in a single MIRAI call."""
+import hmac
 import logging
 import os
 import shutil
@@ -9,9 +10,10 @@ import zipfile
 from pathlib import Path
 
 import pandas as pd
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, FastAPI, File, HTTPException, Security, UploadFile
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel
+from fastapi.security import APIKeyHeader
+from pydantic import BaseModel, ConfigDict, Field
 
 from pipeline import extract_zip_safely, sanitize, scan_folder, submit_exams_to_mirai  # noqa: E402 (adds RETROSPECTIVE/ to sys.path)
 from anonymize_dicoms import MissingSecretError, anonymize_folder
@@ -19,7 +21,7 @@ from db import record_exams
 from ingest import reports as ingest_reports
 from ingest import service as ingest_service
 from ingest.config import build_repository, load_settings, load_source_policy
-from ingest.sources import SourceRejected
+from ingest.sources import SourceRejected, SourceUnavailable
 
 BLOCK_SIZE = int(os.environ.get("INGEST_BLOCK_SIZE", "50"))
 
@@ -98,9 +100,47 @@ async def ingest(file: UploadFile = File(...), multiple_view_choice: str = "firs
 
 
 # --- Batch analysis by URL or /dicom folder (queued; processed by the ingest workers) ---------------
+# Every /batches endpoint requires X-API-Key (decision 0004): reports carry folder paths, and starting
+# a batch makes the backend fetch from the network.
+
+API_KEY_HEADER = "X-API-Key"
+MIN_API_KEY_LENGTH = 32
+INVALID_KEY_DETAIL = "invalid or missing API key"
+api_key_header = APIKeyHeader(name=API_KEY_HEADER, auto_error=False,
+                              description="Clave de acceso entregada por el administrador (INGEST_API_KEYS).")
+
+
+class ErrorDetail(BaseModel):
+    detail: str
+
 
 class BatchRequest(BaseModel):
-    source: str
+    model_config = ConfigDict(json_schema_extra={"example": {"source": "http://10.0.5.20:8080/mamografias/"}})
+
+    source: str = Field(
+        description=("Pegue la URL del listado de carpetas del servidor de imagenes (por ejemplo "
+                     "http://10.0.5.20:8080/mamografias/). Debe ser una direccion de la red interna del hospital "
+                     "y mostrar las carpetas de los estudios. Tambien acepta una carpeta montada bajo /dicom."),
+        examples=["http://10.0.5.20:8080/mamografias/"],
+    )
+
+
+class BatchCreated(BaseModel):
+    batch_id: int
+
+
+def get_api_keys() -> list:
+    """Valid keys from INGEST_API_KEYS (comma-separated); keys shorter than 32 chars are ignored."""
+    return [k.strip() for k in os.environ.get("INGEST_API_KEYS", "").split(",") if len(k.strip()) >= MIN_API_KEY_LENGTH]
+
+
+def require_api_key(key: str = Security(api_key_header), keys: list = Depends(get_api_keys)):
+    if not keys:  # fail closed
+        raise HTTPException(status_code=503, detail="Batch API disabled: INGEST_API_KEYS is not configured "
+                                                    f"(comma-separated keys of at least {MIN_API_KEY_LENGTH} characters).")
+    supplied = (key or "").encode("utf-8")
+    if not any(hmac.compare_digest(supplied, k.encode("utf-8")) for k in keys):
+        raise HTTPException(status_code=401, detail=INVALID_KEY_DETAIL)
 
 
 _ingest_schema_ready = False
@@ -127,16 +167,38 @@ def get_source_policy():
     return load_source_policy()
 
 
-@app.post("/batches", status_code=201)
+batches = APIRouter(
+    prefix="/batches",
+    tags=["Lotes"],
+    dependencies=[Security(require_api_key)],
+    responses={401: {"model": ErrorDetail, "description": "Falta la cabecera X-API-Key o la clave no es valida."},
+               503: {"model": ErrorDetail, "description": "Procesamiento por lotes no configurado."}},
+)
+
+
+@batches.post(
+    "",
+    status_code=201,
+    response_model=BatchCreated,
+    summary="Crear un lote a partir de una URL de imagenes",
+    description=("Pegue la URL del listado de carpetas del servidor de imagenes y envie. El sistema verifica al "
+                 "momento que la URL responda y muestre carpetas; si no, devuelve el motivo y no crea el lote. "
+                 "Use el boton Authorize para cargar la clave X-API-Key."),
+    responses={400: {"model": ErrorDetail, "description": "URL no permitida: esquema, red o ruta fuera de /dicom."},
+               422: {"model": ErrorDetail, "description": "No se pudo conectar, o la URL no es un listado de "
+                                                          "carpetas o esta vacia."}},
+)
 def create_batch(body: BatchRequest, repo=Depends(get_ingest_repository), policy=Depends(get_source_policy)):
     try:
         batch_id = ingest_service.create_batch(repo, body.source, policy)
     except SourceRejected as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except SourceUnavailable as e:
+        raise HTTPException(status_code=422, detail=str(e))
     return {"batch_id": batch_id}
 
 
-@app.get("/batches/{batch_id}")
+@batches.get("/{batch_id}", summary="Progreso del lote", responses={404: {"model": ErrorDetail}})
 def get_batch(batch_id: int, repo=Depends(get_ingest_repository)):
     status = ingest_service.batch_status(repo, batch_id)
     if status is None:
@@ -151,15 +213,18 @@ def _report_data_or_404(repo, batch_id: int) -> dict:
     return data
 
 
-@app.get("/batches/{batch_id}/fallos.txt")
+@batches.get("/{batch_id}/fallos.txt", summary="Reporte de fallos (texto)", responses={404: {"model": ErrorDetail}})
 def get_batch_failures(batch_id: int, repo=Depends(get_ingest_repository)):
     content = ingest_reports.build_failures_txt(_report_data_or_404(repo, batch_id))
     return Response(content=content, media_type="text/plain; charset=utf-8",
                     headers={"Content-Disposition": f"attachment; filename=fallos_batch_{batch_id}.txt"})
 
 
-@app.get("/batches/{batch_id}/report.xlsx")
+@batches.get("/{batch_id}/report.xlsx", summary="Reporte Excel del lote", responses={404: {"model": ErrorDetail}})
 def get_batch_report(batch_id: int, repo=Depends(get_ingest_repository)):
     content = ingest_reports.build_report_xlsx(_report_data_or_404(repo, batch_id))
     return Response(content=content, media_type=ingest_reports.XLSX_MEDIA_TYPE,
                     headers={"Content-Disposition": f"attachment; filename=report_batch_{batch_id}.xlsx"})
+
+
+app.include_router(batches)

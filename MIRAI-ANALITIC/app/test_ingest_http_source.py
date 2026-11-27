@@ -5,6 +5,7 @@ hostile links, source validation (allowlist, schemes, /dicom), and HttpIndexSour
 ThreadingHTTPServer on 127.0.0.1 (listing, nested crawl, Range, size cap, redirects, disallowed host).
 """
 import functools
+import socket
 import tempfile
 import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -101,7 +102,12 @@ assert names(parse_listing(sub.encode(), "text/html", ROOT + "PAT_A/", ROOT)) ==
 assert parse_allowed_hosts("") == set()
 assert parse_allowed_hosts(" e2e-files:8080 , Files.Example ") == {("e2e-files", 8080), ("files.example", None)}
 
-policy = SourcePolicy(allowed_hosts=parse_allowed_hosts("e2e-files:8080,files.example"), dicom_root="/dicom")
+def no_dns(host, port):
+    raise socket.gaierror(socket.EAI_NONAME, "unknown")
+
+
+policy = SourcePolicy(allowed_hosts=parse_allowed_hosts("e2e-files:8080,files.example"), dicom_root="/dicom",
+                      resolver=no_dns)
 assert validate_source("http://e2e-files:8080/", policy) == "http://e2e-files:8080/"
 assert validate_source("http://e2e-files:8080/studies", policy) == "http://e2e-files:8080/studies/"
 assert validate_source("https://files.example:8443/x/", policy) == "https://files.example:8443/x/"
@@ -118,9 +124,10 @@ def rejected(source, pol=policy, contains=""):
     return False
 
 
-assert rejected("http://e2e-files:9090/", contains="not allowed")
-assert rejected("http://example.com/", contains="not allowed")
-assert rejected("http://e2e-files:8080/", SourcePolicy(allowed_hosts=set()), contains="not allowed")
+# Not an override (other port / other host): falls through to the network policy, which needs DNS.
+assert rejected("http://e2e-files:9090/", contains="could not resolve")
+assert rejected("http://example.com/", contains="could not resolve")
+assert rejected("http://e2e-files:8080/", SourcePolicy(allowed_hosts=set(), resolver=no_dns), contains="could not resolve")
 assert rejected("ftp://e2e-files:8080/", contains="scheme")
 assert rejected("file:///etc/passwd", contains="scheme")
 assert rejected("http://user:pw@e2e-files:8080/", contains="credentials")
@@ -224,11 +231,11 @@ assert issubclass(SourceError, OSError)
 
 # Disallowed host: rejected before any request is sent, also per request.
 try:
-    HttpIndexSource(root_url, allowed_hosts={("other-host", None)}, max_file_bytes=1000)
+    HttpIndexSource(root_url, SourcePolicy(allowed_hosts={("other-host", None)}, max_file_bytes=1000))
     raise AssertionError("disallowed host accepted")
 except SourceRejected:
     pass
-src._allowed_hosts = set()  # allowlist revoked after creation: every request re-checks
+src._policy = SourcePolicy(max_file_bytes=10_000)  # override revoked: loopback is denied on the next request
 try:
     src.list_dir("")
     raise AssertionError("request to a no-longer-allowed host was sent")

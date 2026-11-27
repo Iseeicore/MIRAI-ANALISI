@@ -11,7 +11,7 @@ import sys
 
 from . import service
 from .config import build_repository, load_settings, load_source_policy
-from .sources import SourceRejected
+from .sources import SourceRejected, SourceUnavailable
 
 
 def _print_status(report: dict):
@@ -48,7 +48,7 @@ def main(argv=None):
     if args.command == "create-batch":
         try:
             batch_id = service.create_batch(repo, args.root, load_source_policy())
-        except SourceRejected as exc:
+        except (SourceRejected, SourceUnavailable) as exc:
             sys.exit(f"rejected: {exc}")
         print(f"batch {batch_id} created")
     elif args.batch_id is not None:
