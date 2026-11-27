@@ -9,6 +9,7 @@ Todo corre en contenedores Docker: ni las imágenes DICOM ni los resultados sale
 - **Servidor Linux de la red del hospital (uso real):** sección [Despliegue en un servidor Linux de la red](#despliegue-en-un-servidor-linux-de-la-red-paso-a-paso).
 - **PC Windows de desarrollo:** secciones [1](#1-descargar-la-imagen-de-mirai) y [2](#2-levantar-el-backend-completo-con-docker-compose).
 - **Enviar un lote desde otro equipo (supervisor):** sección [Probar desde otra máquina de la red](#probar-desde-otra-máquina-de-la-red-paso-a-paso).
+- **Guías independientes en `docs/`:** [docs/despliegue-linux.md](docs/despliegue-linux.md) (instalar y probar en Linux de principio a fin) y [docs/reinicio.md](docs/reinicio.md) (qué hacer después de apagar o reiniciar el equipo).
 
 ## Arquitectura
 
